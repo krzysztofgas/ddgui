@@ -1,14 +1,23 @@
 mod disks;
+mod error;
 mod format;
+mod formats;
 mod job;
+mod pump;
 mod ui;
 
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{ ProtocolObject, Sel };
 use objc2::sel;
-use objc2_app_kit::{ NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem };
-use objc2_foundation::{ NSProcessInfo, NSString, ns_string };
+use objc2_app_kit::{
+    NSApplication,
+    NSApplicationActivationPolicy,
+    NSEventModifierFlags,
+    NSMenu,
+    NSMenuItem,
+};
+use objc2_foundation::{ NSProcessInfo, NSString };
 
 fn main() {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -23,60 +32,70 @@ fn main() {
     app.run();
 }
 
-fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
-    let name = NSProcessInfo::processInfo().processName();
-    let bar = NSMenu::new(mtm);
-    let app_item = NSMenuItem::new(mtm);
-    let app_menu = NSMenu::new(mtm);
-    let entries: [(String, Option<objc2::runtime::Sel>, &NSString); 3] = [
-        (format!("Hide {name}"), Some(sel!(hide:)), ns_string!("h")),
-        ("Hide Others".to_string(), Some(sel!(hideOtherApplications:)), ns_string!("h")),
-        (format!("Quit {name}"), Some(sel!(terminate:)), ns_string!("q")),
-    ];
-    for (i, (title, action, key)) in entries.iter().enumerate() {
-        if i == 2 {
-            app_menu.addItem(&NSMenuItem::separatorItem(mtm));
-        }
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                mtm.alloc(),
-                &NSString::from_str(title),
-                *action,
-                key
-            )
-        };
-        if i == 1 {
-            item.setKeyEquivalentModifierMask(
-                objc2_app_kit::NSEventModifierFlags::Command |
-                    objc2_app_kit::NSEventModifierFlags::Option
-            );
-        }
-        app_menu.addItem(&item);
-    }
-    app_item.setSubmenu(Some(&app_menu));
-    bar.addItem(&app_item);
+type Entry<'a> = Option<(&'a str, Sel, &'a str, NSEventModifierFlags)>;
 
-    let window_item = NSMenuItem::new(mtm);
-    let window_menu = NSMenu::initWithTitle(mtm.alloc(), ns_string!("Window"));
-    let close = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            mtm.alloc(),
-            ns_string!("Close"),
-            Some(sel!(performClose:)),
-            ns_string!("w")
-        )
-    };
-    let minimize = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            mtm.alloc(),
-            ns_string!("Minimize"),
-            Some(sel!(performMiniaturize:)),
-            ns_string!("m")
-        )
-    };
-    window_menu.addItem(&minimize);
-    window_menu.addItem(&close);
-    window_item.setSubmenu(Some(&window_menu));
-    bar.addItem(&window_item);
+fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
+    let name = NSProcessInfo::processInfo().processName().to_string();
+    let cmd = NSEventModifierFlags::Command;
+    let cmd_opt = NSEventModifierFlags::Command | NSEventModifierFlags::Option;
+    let cmd_shift = NSEventModifierFlags::Command | NSEventModifierFlags::Shift;
+    let hide = format!("Hide {name}");
+    let quit = format!("Quit {name}");
+    let bar = NSMenu::new(mtm);
+    let menus: [(&str, Vec<Entry<'_>>); 3] = [
+        (
+            &name,
+            vec![
+                Some((&hide, sel!(hide:), "h", cmd)),
+                Some(("Hide Others", sel!(hideOtherApplications:), "h", cmd_opt)),
+                Some(("Show All", sel!(unhideAllApplications:), "", cmd)),
+                None,
+                Some((&quit, sel!(terminate:), "q", cmd))
+            ],
+        ),
+        (
+            "Edit",
+            vec![
+                Some(("Undo", sel!(undo:), "z", cmd)),
+                Some(("Redo", sel!(redo:), "z", cmd_shift)),
+                None,
+                Some(("Cut", sel!(cut:), "x", cmd)),
+                Some(("Copy", sel!(copy:), "c", cmd)),
+                Some(("Paste", sel!(paste:), "v", cmd)),
+                Some(("Select All", sel!(selectAll:), "a", cmd))
+            ],
+        ),
+        (
+            "Window",
+            vec![
+                Some(("Minimize", sel!(performMiniaturize:), "m", cmd)),
+                Some(("Close", sel!(performClose:), "w", cmd))
+            ],
+        ),
+    ];
+    for (title, entries) in menus {
+        let menu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(title));
+        for entry in entries {
+            let item = match entry {
+                None => NSMenuItem::separatorItem(mtm),
+                Some((label, action, key, modifiers)) => {
+                    let item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            mtm.alloc(),
+                            &NSString::from_str(label),
+                            Some(action),
+                            &NSString::from_str(key)
+                        )
+                    };
+                    item.setKeyEquivalentModifierMask(modifiers);
+                    item
+                }
+            };
+            menu.addItem(&item);
+        }
+        let holder = NSMenuItem::new(mtm);
+        holder.setSubmenu(Some(&menu));
+        bar.addItem(&holder);
+    }
     bar
 }
