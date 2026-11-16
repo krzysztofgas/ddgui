@@ -14,6 +14,31 @@ use crate::disks::Disk;
 
 const CHUNK: usize = 4 << 20;
 const SECTOR: u64 = 512;
+const STOPPED: &str = "dd stopped unexpectedly";
+const OPERANDS: [&str; 16] = [
+    "bs", "cbs", "conv", "count", "files", "fillchar", "ibs", "iflag", "iseek", "obs", "oflag",
+    "oseek", "seek", "skip", "speed", "status",
+];
+
+pub fn parse_args(text: &str) -> Result<Vec<String>, String> {
+    text.split_whitespace()
+        .map(|token| {
+            let (key, value) = token
+                .split_once('=')
+                .ok_or_else(|| format!("“{token}” is not a dd operand (expected key=value)"))?;
+            if key == "if" || key == "of" {
+                return Err(format!("“{key}=” is set automatically"));
+            }
+            if !OPERANDS.contains(&key) {
+                return Err(format!("Unknown dd operand “{key}”"));
+            }
+            if value.is_empty() {
+                return Err(format!("“{key}=” needs a value"));
+            }
+            Ok(token.to_string())
+        })
+        .collect()
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -49,7 +74,12 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn start(direction: Direction, image: PathBuf, disk: Disk) -> Result<Job, String> {
+    pub fn start(
+        direction: Direction,
+        image: PathBuf,
+        disk: Disk,
+        args: Vec<String>,
+    ) -> Result<Job, String> {
         let total = match direction {
             Direction::ImageToDisk => {
                 let meta = fs
@@ -88,6 +118,7 @@ impl Job {
             direction,
             image,
             disk,
+            args,
             status: status.clone(),
             cancel: cancel.clone(),
         };
@@ -115,6 +146,7 @@ struct Context {
     direction: Direction,
     image: PathBuf,
     disk: Disk,
+    args: Vec<String>,
     status: Arc<Mutex<Status>>,
     cancel: Arc<AtomicBool>,
 }
@@ -245,10 +277,12 @@ impl Context {
         } else {
             match (dd_result, copy_result) {
                 (Err(e), _) => Outcome::Failed(e),
+                (Ok(()), Err(e)) if e == STOPPED && !self.args.is_empty() => Outcome::Finished,
                 (Ok(()), Err(e)) => Outcome::Failed(e),
                 (Ok(()), Ok(())) if aborted.load(Ordering::SeqCst) => {
                     Outcome::Failed("dd exited before starting".to_string())
                 }
+                (Ok(()), Ok(())) if !self.args.is_empty() => Outcome::Finished,
                 (Ok(()), Ok(())) => self.verify(),
             }
         };
@@ -293,14 +327,24 @@ impl Context {
         let pipe = shell_quote(&fifo.to_string_lossy());
         let node = shell_quote(&self.disk.node());
         let raw = shell_quote(&self.disk.raw_node());
+        let has = |key: &str| self.args.iter().any(|a| a.starts_with(&format!("{key}=")));
+        let mut operands = Vec::new();
+        if !has("bs") && !has("ibs") {
+            operands.push("ibs=4m".to_string());
+        }
+        if !has("bs") && !has("obs") {
+            operands.push("obs=4m".to_string());
+        }
+        operands.extend(self.args.iter().map(|a| shell_quote(a)));
+        let operands = operands.join(" ");
         let script = match self.direction {
             Direction::ImageToDisk =>
                 format!(
-                    "/usr/sbin/diskutil unmountDisk force {node} >/dev/null && /bin/dd if={pipe} of={raw} ibs=4m obs=4m && /bin/sync"
+                    "/usr/sbin/diskutil unmountDisk force {node} >/dev/null && /bin/dd if={pipe} of={raw} {operands} && /bin/sync"
                 ),
             Direction::DiskToImage =>
                 format!(
-                    "/usr/sbin/diskutil unmountDisk {node} >/dev/null && /bin/dd if={raw} of={pipe} ibs=4m obs=4m"
+                    "/usr/sbin/diskutil unmountDisk {node} >/dev/null && /bin/dd if={raw} of={pipe} {operands}"
                 ),
         };
         Command::new("/usr/bin/osascript")
@@ -419,7 +463,7 @@ impl Context {
 fn write_pipe(pipe: &mut File, data: &[u8]) -> Result<(), String> {
     pipe.write_all(data).map_err(|e| {
         if e.kind() == ErrorKind::BrokenPipe {
-            "dd stopped unexpectedly".to_string()
+            STOPPED.to_string()
         } else {
             format!("Couldn't send data to dd: {e}")
         }

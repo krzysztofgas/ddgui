@@ -54,10 +54,10 @@ use objc2_foundation::{
 
 use crate::disks::{ self, Disk, Watch };
 use crate::format;
-use crate::job::{ Direction, Job, Outcome, Phase };
+use crate::job::{ self, Direction, Job, Outcome, Phase };
 
 const WIDTH: f64 = 500.0;
-const LABEL_WIDTH: f64 = 52.0;
+const LABEL_WIDTH: f64 = 60.0;
 
 pub struct Views {
     window: Retained<NSWindow>,
@@ -65,6 +65,7 @@ pub struct Views {
     image_field: Retained<NSTextField>,
     choose: Retained<NSButton>,
     devices: Retained<NSPopUpButton>,
+    options: Retained<NSTextField>,
     progress: Retained<NSProgressIndicator>,
     status: Retained<NSTextField>,
     action: Retained<NSButton>,
@@ -266,6 +267,15 @@ impl Controller {
         );
         let device_row = row(mtm, &[&caption(mtm, "Device"), &devices]);
 
+        let options = NSTextField::textFieldWithString(ns_string!(""), mtm);
+        options.setPlaceholderString(Some(ns_string!("Optional, e.g. bs=1m conv=sync")));
+        options.setToolTip(Some(ns_string!("Extra dd operands, separated by spaces")));
+        options.setContentHuggingPriority_forOrientation(
+            1.0,
+            NSLayoutConstraintOrientation::Horizontal
+        );
+        let options_row = row(mtm, &[&caption(mtm, "Options"), &options]);
+
         let progress = NSProgressIndicator::new(mtm);
         progress.setStyle(NSProgressIndicatorStyle::Bar);
         progress.setIndeterminate(false);
@@ -315,7 +325,7 @@ impl Controller {
             right: 20.0,
         });
         stack.addArrangedSubview(&mode);
-        for view in [&**image_row, &**device_row, &**progress, &**bottom_row] {
+        for view in [&**image_row, &**device_row, &**options_row, &**progress, &**bottom_row] {
             stack.addArrangedSubview(view);
             view.widthAnchor()
                 .constraintEqualToAnchor_constant(&stack.widthAnchor(), -40.0)
@@ -335,6 +345,7 @@ impl Controller {
                 image_field,
                 choose,
                 devices,
+                options,
                 progress,
                 status,
                 action,
@@ -462,6 +473,7 @@ impl Controller {
         v.mode.setEnabled(!busy);
         v.choose.setEnabled(!busy);
         v.devices.setEnabled(!busy && has_disks);
+        v.options.setEnabled(!busy);
         v.choose.setTitle(match direction {
             Direction::ImageToDisk => ns_string!("Choose…"),
             Direction::DiskToImage => ns_string!("Save As…"),
@@ -570,6 +582,20 @@ impl Controller {
             self.show_error("No image selected");
             return;
         };
+        let text = self
+            .ivars()
+            .views
+            .borrow()
+            .as_ref()
+            .map(|v| v.options.stringValue().to_string())
+            .unwrap_or_default();
+        let args = match job::parse_args(&text) {
+            Ok(args) => args,
+            Err(e) => {
+                self.show_error(&format!("Invalid options: {e}"));
+                return;
+            }
+        };
         if direction == Direction::ImageToDisk {
             let file = image
                 .file_name()
@@ -588,7 +614,7 @@ impl Controller {
                 return;
             }
         }
-        match Job::start(direction, image, disk) {
+        match Job::start(direction, image, disk, args) {
             Ok(job) => {
                 self.ivars().direction.set(Some(direction));
                 self.ivars().message.replace(None);
